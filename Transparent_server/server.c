@@ -7,7 +7,13 @@ struct Client_data
     struct sockaddr_in client_addr;
 };
 
+char* errmsg = NULL;
+
+// 函数声明
+int InitDB(void);
+int actionDB();
 void *thread_func(void *arg);
+
 
 int main(int argc, char const *argv[])
 {
@@ -47,10 +53,13 @@ int main(int argc, char const *argv[])
     }
 
     // 监听
-    if(-1 == listen(sockfd, 5))
+    if(-1 == listen(sockfd, 10))
     {
         ERR_LOG("listen error");
     }
+
+    // 初始化数据库
+    InitDB();
 
     // 客户端信息结构体
     struct sockaddr_in client_addr;
@@ -71,7 +80,7 @@ int main(int argc, char const *argv[])
         {
             ERR_LOG("accept error");
         }
-        printf("客户端连接成功\n");
+        printf("客户端[accept_fd:%d, ip:%s, port:%d]连接成功\n", accept_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
 
         // 创建子线程
         client_data.accept_fd = accept_fd;
@@ -90,32 +99,83 @@ int main(int argc, char const *argv[])
     return 0;
 }
 
+// 创建数据库、表
+int InitDB(void)
+{
+    // 创建数据库并打开
+    sqlite3 *db;
+    if(sqlite3_open("./transparent.db", &db) != SQLITE_OK)
+    {
+        printf("sqlite3_open failed: %d:%s\n", sqlite3_errcode(db), sqlite3_errmsg(db));
+        return -1;
+    }
+    printf("sqlite3_open success\n");
+
+    // 创建Users表
+    char sql[256] = "create table if not exists users (id integer primary key autoincrement, name char[30], passwd text)";
+    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg))
+    {
+        fprintf(stderr, "SQL error: %s\n", errmsg);
+        sqlite3_free(errmsg);
+        return -1;
+    }
+    printf("create table success\n");
+
+    // 创建Devices表
+    sql[256] = "create table if not exists devices (id integer primary key autoincrement, device_name char[30], active integer, foreign key(id) references users(id))";
+    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg))
+    {
+        fprintf(stderr, "SQL error: %s\n", errmsg);
+        sqlite3_free(errmsg);
+        return -1;
+    }
+
+    // 关闭数据库
+    sqlite3_close(db);
+    return 0;
+}
+
+// 子线程处理函数
 void *thread_func(void *arg)
 {
     // 获取传参
-    struct Client_data *client_data = (struct Client_data *)arg;
-    char buf[1024] = {0};
+    int accept_fd = ((struct Client_data *)arg) -> accept_fd;
+    struct sockaddr_in client_addr = ((struct Client_data *)arg) -> client_addr;;
+    char buf[1024] = "";
     ssize_t res = 0;
 
     while (1)
     {
         memset(buf, 0, sizeof(buf));
         // 接收数据
-        res = recv(client_data->accept_fd, buf, sizeof(buf), 0);
+        res = recv(accept_fd, buf, sizeof(buf), 0);
         if (-1 == res)
         {
             perror("recv error");
             break;
         } else if (0 == res)
         {
-            printf("客户端[%s:%d]断开连接...\n", inet_ntoa(client_data->client_addr.sin_addr), ntohs(client_data->client_addr.sin_port));
-            close(client_data->accept_fd);
+            printf("客户端[accept_fd:%d:%s:%d]断开连接...\n", accept_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+            close(accept_fd);
             pthread_exit(NULL);
+            break;
         }
-        printf("客户端[%s:%d]说：%s\n", inet_ntoa(client_data->client_addr.sin_addr), ntohs(client_data->client_addr.sin_port), buf);
-        
+        printf("客户端[%s:%d]发送了数据:%s\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), buf);
 
+        // 发送数据
+        memset(buf, 0, sizeof(buf));
+        strcat(buf, "服务器收到数据");
+        res = send(accept_fd, buf, sizeof(buf), 0);
+        if (-1 == res)
+        {
+            perror("send error");
+            break;
+        }
+        printf("数据发送成功\n");
     }
-    
 
+    // 关闭连接
+    close(accept_fd);
+    // 释放线程
+    pthread_exit(NULL);
 }
