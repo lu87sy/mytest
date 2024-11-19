@@ -169,9 +169,10 @@ void *thread_func(void *arg)
     struct data_info data;
     data.accept_fd = accept_fd;
     data.active = 0;    // 初始化设备状态
+    data.tid = pthread_self();
+
     char * tmp, *saveptr;
     char value[20];
-    // char username[20], passwd[20], devname[20];
     // 打印子线程id
     printf("子线程id:%lu\n", pthread_self());
 
@@ -187,6 +188,11 @@ void *thread_func(void *arg)
         } else if (0 == res)
         {
             printf("客户端[accept_fd:%d:%s:%d]断开连接...\n", accept_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+            printf("-----设备名称%s-------\n", data.devname);
+            printf("-----套接字%d-------\n", data.accept_fd);
+            printf("-----线程id%ld---------\n", data.tid);
+            actionDB(3, &data);
+            // 关闭连接
             close(accept_fd);
             pthread_exit(NULL);
             break;
@@ -257,7 +263,21 @@ void *thread_func(void *arg)
                         if (res == 1)
                         {
                             printf("2.%s设备在线\n", data.devname);
-                            printf("accpet_fd:%d, name:%s, passwd:%s, devname:%s, thread_id:%lu\n", data.accept_fd, data.username, data.passwd, data.devname, data.tid);
+                            printf("accpet_fd:%d, devname:%s, thread_id:%lu\n", data.accept_fd, data.devname, data.tid);
+                            // 更新设备状态
+                            printf("更新设备状态\n");
+                            if (-1 == send(data.accept_fd, "toCli:your device is logged in elsewhere;" , strlen("toCli:your device is logged in elsewhere;"), 0))
+                            {
+                                perror("send error");
+                                break;
+                            }
+
+                            actionDB(3, &data);
+                            // 踢客户端下线
+                            printf("踢下线---%d--\n", data.accept_fd);
+                            close(data.accept_fd);
+                            pthread_cancel(data.tid);
+
                             // 同设备多次登录踢下线
                         } else if (res == 2) {
                             if (-1 == send(accept_fd, "toCli:log failed,username or password is wrong;" , strlen("toCli:log failed,username or password is wrong;"), 0))
@@ -372,7 +392,7 @@ int actionDB(int cases, struct data_info *data)
     int nRow = 0, nColumn = 0;  // 定义行、列
     switch (cases)
     {
-    // case 1为注册，2为登录，3为查询
+    // case 1为注册，2为登录，3为更新
     case 1:
         // 先判断用户名是否存在
         printf("已进入注册流程 %s, %s\n", data->username, data->passwd);
@@ -404,9 +424,10 @@ int actionDB(int cases, struct data_info *data)
         }
         break;
     case 2:
+        
         // 连表判断设备是否在线
         printf("已进入登录流程，accapt_fd:%d, %s, %s, %s, thread_id:%lu\n", data->accept_fd, data->username, data->passwd, data->devname, pthread_self());
-        sprintf(sql, "select users.name, devices.device_name, devices.active from users inner join devices on users.id = devices.user_id where users.name = '%s' and devices.device_name = '%s' and devices.active = 1", data->username, data->devname);
+        sprintf(sql, "select devices.active, devices.thread_id, devices.accept_fd from users inner join devices on users.id = devices.user_id where users.name = '%s' and devices.device_name = '%s' and devices.active = 1", data->username, data->devname);
         if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg))
         {
             printf("SQL error: %s\n", errmsg);
@@ -417,6 +438,11 @@ int actionDB(int cases, struct data_info *data)
         {
             // 通过flag判断是否有返回结果为1则存在
             printf("1.%s设备在线\n", data->devname);
+            // 更新数据信息结构体
+            data->active = atoi(pazResult[3]);
+            data->tid = atol(pazResult[4]);
+            data->accept_fd = atoi(pazResult[5]);
+            printf("在线设备accept_fd:%d, thread_id:%lu\n", data->accept_fd, data->tid);
             // 释放结果集
             sqlite3_free_table(pazResult);
             // 关闭数据库
@@ -441,7 +467,7 @@ int actionDB(int cases, struct data_info *data)
             return 2;
         }
         // 判断设备信息是否存在
-        sprintf(sql, "select * from devices where device_name = '%s'", data->devname);
+        sprintf(sql, "select * from devices where device_name = '%s' and user_id = (select id from users where name = '%s')", data->devname, data->username);
         if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg))
         {
             printf("SQL error: %s\n", errmsg);
@@ -451,7 +477,7 @@ int actionDB(int cases, struct data_info *data)
         if (nRow == 1)
         {
             // 存在就更新数据
-            sprintf(sql, "update devices set active = 1, thread_id = %lu, accept_fd = %d where device_name = '%s'", pthread_self(), data->accept_fd, data->devname);
+            sprintf(sql, "update devices set active = 1, thread_id = %lu, accept_fd = %d where device_name = '%s' and user_id = (select id from users where name = '%s')", pthread_self(), data->accept_fd, data->devname, data->username);
             if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
             {
                 printf("SQL error: %s\n", errmsg);
@@ -460,7 +486,7 @@ int actionDB(int cases, struct data_info *data)
             }
             
         } else {
-            // 查询无结果就插入数据库
+            // 不存在就插入数据库
             sprintf(sql, "insert into devices (device_name, active, thread_id, accept_fd, user_id) values ('%s', 1, %lu, %d, (select id from users where name = '%s'))", data->devname, pthread_self(), data->accept_fd, data->username);
             if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
             {
@@ -472,7 +498,15 @@ int actionDB(int cases, struct data_info *data)
 
         break;
     case 3:
-        /* code */
+        // 更新设备的状态、accpet_fd、thread_id
+        sprintf(sql, "update devices set active = %d, accept_fd = %d, thread_id = %d where device_name = '%s' and user_id = (select id from users where name = '%s') or thread_id = %lu", 0, 0, 0, data->devname, data->username, data->tid);
+        if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
+        {
+            printf("SQL error: %s\n", errmsg);
+            sqlite3_free(errmsg);
+            return -1;
+        }
+        printf("更新设备状态成功\n");
         break;
     default:
         break;
