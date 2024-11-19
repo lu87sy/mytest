@@ -7,13 +7,24 @@ struct Client_data
     struct sockaddr_in client_addr;
 };
 
+// 定义数据库参数结构体
+struct data_info
+{
+    char username[20];
+    char passwd[20];
+    char devname[20];
+    int active;
+    pthread_t tid;
+    int accept_fd;
+};
+
+
 char* errmsg = NULL;
 
 // 函数声明
 int InitDB(void);
-int actionDB(int cases, char *username, char *passwd, char *devname);
+int actionDB(int cases, struct data_info *data);
 void *thread_func(void *arg);
-int callback(void *data, int argc, char **argv, char **azColName);
 
 
 int main(int argc, char const *argv[])
@@ -86,6 +97,8 @@ int main(int argc, char const *argv[])
         // 创建子线程
         client_data.accept_fd = accept_fd;
         client_data.client_addr = client_addr;
+        // 子线程id
+        // pthread_t thread;
         pthread_create(&tid, NULL, thread_func, (void *)&client_data);
         
         // 分离子线程
@@ -132,7 +145,7 @@ int InitDB(void)
     printf("create table success\n");
 
     // 创建Devices表
-    sprintf(sql,"create table if not exists devices (id integer primary key autoincrement, device_name char[30], active integer, user_id integer, foreign key(user_id) references users(id))");
+    sprintf(sql,"create table if not exists devices (id integer primary key autoincrement, device_name char[30], active integer, thread_id integer, accept_fd integer, user_id integer, foreign key(user_id) references users(id))");
     if (sqlite3_exec(db, sql, NULL, NULL, &errmsg))
     {
         printf("SQL error: %s\n", errmsg);
@@ -153,9 +166,14 @@ void *thread_func(void *arg)
     struct sockaddr_in client_addr = ((struct Client_data *)arg) -> client_addr;;
     char buf[1024] = "";
     ssize_t res = 0;
+    struct data_info data;
+    data.accept_fd = accept_fd;
+    data.active = 0;    // 初始化设备状态
     char * tmp, *saveptr;
     char value[20];
-    char username[20], passwd[20], devname[20];
+    // char username[20], passwd[20], devname[20];
+    // 打印子线程id
+    printf("子线程id:%lu\n", pthread_self());
 
     while (1)
     {
@@ -191,9 +209,9 @@ void *thread_func(void *arg)
                     printf("这是注册数据\n");
                     printf("当前会话的accept_fd:%d\n", accept_fd);
                     // 注册流程
-                    sscanf(buf, "%*[^u]usrname=%19[^,]", username);
-                    sscanf(buf, "%*[^p]passwd=%19[^;]", passwd);
-                    if (strcmp(username, "") == 0 || strcmp(passwd, "") == 0)
+                    sscanf(buf, "%*[^u]usrname=%19[^,]", data.username);
+                    sscanf(buf, "%*[^p]passwd=%19[^;]", data.passwd);
+                    if (strcmp(data.username, "") == 0 || strcmp(data.passwd, "") == 0)
                     {
                         if (-1 == send(accept_fd, "toCli:reg failed,username and password cannot be empty;" , strlen("toCli:reg failed,username and password cannot be empty;"), 0))
                         {
@@ -201,7 +219,7 @@ void *thread_func(void *arg)
                             break;
                         }
                     } else{
-                        int res = actionDB(1, username, passwd, NULL);
+                        int res = actionDB(1, &data);
                         if (res == 1)
                         {
                             if (-1 == send(accept_fd, "toCli:reg failed,username already exists;" , strlen("toCli:reg failed,username already exists;"), 0))
@@ -223,10 +241,11 @@ void *thread_func(void *arg)
                 {
                     printf("这是登录数据\n");
                     // 登录流程 toServ:action=log,usrname=xiaowang,passwd=123456,devname=sml001;
-                    sscanf(buf, "%*[^u]usrname=%19[^,]", username);
-                    sscanf(buf, "%*[^p]passwd=%19[^,]", passwd);
-                    sscanf(buf, "%*[^d]devname=%19[^;]", devname);
-                    if (strcmp(username, "") == 0 || strcmp(passwd, "") == 0 || strcmp(devname, "") == 0)
+                    sscanf(buf, "%*[^u]usrname=%19[^,]", data.username);
+                    sscanf(buf, "%*[^p]passwd=%19[^,]", data.passwd);
+                    sscanf(buf, "%*[^,],%*[^,],%*[^,],devname=%49[^;]", data.devname);
+                    printf("username:%s, passwd:%s, devname:%s\n", data.username, data.passwd, data.devname);
+                    if (strcmp(data.username, "") == 0 || strcmp(data.passwd, "") == 0 || strcmp(data.devname, "") == 0)
                     {
                         if (-1 == send(accept_fd, "toCli:log failed,username,password and devname cannot be empty;" , strlen("toCli:log failed,username,password and devname cannot be empty;"), 0))
                         {
@@ -234,10 +253,25 @@ void *thread_func(void *arg)
                             break;
                         }
                     } else {
-                        int res = actionDB(2, username, passwd, devname);
+                        int res = actionDB(2, &data);
                         if (res == 1)
                         {
-                            /* code */
+                            printf("2.%s设备在线\n", data.devname);
+                            printf("accpet_fd:%d, name:%s, passwd:%s, devname:%s, thread_id:%lu\n", data.accept_fd, data.username, data.passwd, data.devname, data.tid);
+                            // 同设备多次登录踢下线
+                        } else if (res == 2) {
+                            if (-1 == send(accept_fd, "toCli:log failed,username or password is wrong;" , strlen("toCli:log failed,username or password is wrong;"), 0))
+                            {
+                                perror("send error");
+                                break;
+                            }
+                        } else {
+                            if (-1 == send(accept_fd, "toCli:log success;" , strlen("toCli:log success;"), 0))
+                            {
+                                perror("send error");
+                                break;
+                            }
+                            printf("登录成功\n");
                         }
                         
                     }
@@ -314,7 +348,7 @@ void *thread_func(void *arg)
 }
 
 // 数据库操作
-int actionDB(int cases, char *username, char *passwd, char *devname)
+int actionDB(int cases, struct data_info *data)
 {
     // 打开数据库
     sqlite3 *db;
@@ -341,8 +375,8 @@ int actionDB(int cases, char *username, char *passwd, char *devname)
     // case 1为注册，2为登录，3为查询
     case 1:
         // 先判断用户名是否存在
-        printf("已进入注册流程 %s, %s\n", username, passwd);
-        sprintf(sql, "select * from users where name = '%s'", username);
+        printf("已进入注册流程 %s, %s\n", data->username, data->passwd);
+        sprintf(sql, "select * from users where name = '%s'", data->username);
         if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg) != SQLITE_OK)
         {
             printf("SQL error: %s\n", errmsg);
@@ -361,7 +395,7 @@ int actionDB(int cases, char *username, char *passwd, char *devname)
             return 1;
         }
         // 用户名不存在就注册
-        sprintf(sql, "insert into users (name, passwd) values ('%s', '%s')", username, passwd);
+        sprintf(sql, "insert into users (name, passwd) values ('%s', '%s')", data->username, data->passwd);
         if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
         {
             printf("SQL error: %s\n", errmsg);
@@ -370,7 +404,72 @@ int actionDB(int cases, char *username, char *passwd, char *devname)
         }
         break;
     case 2:
-        /* code */
+        // 连表判断设备是否在线
+        printf("已进入登录流程，accapt_fd:%d, %s, %s, %s, thread_id:%lu\n", data->accept_fd, data->username, data->passwd, data->devname, pthread_self());
+        sprintf(sql, "select users.name, devices.device_name, devices.active from users inner join devices on users.id = devices.user_id where users.name = '%s' and devices.device_name = '%s' and devices.active = 1", data->username, data->devname);
+        if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg))
+        {
+            printf("SQL error: %s\n", errmsg);
+            sqlite3_free(errmsg);
+            return -1;
+        }
+        if (nRow == 1)
+        {
+            // 通过flag判断是否有返回结果为1则存在
+            printf("1.%s设备在线\n", data->devname);
+            // 释放结果集
+            sqlite3_free_table(pazResult);
+            // 关闭数据库
+            sqlite3_close(db);
+            // 用户存在返回1
+            return 1;
+        }
+        // 判断用户名密码是否正确
+        sprintf(sql, "select * from users where name = '%s' and passwd = '%s'", data->username, data->passwd);
+        if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg))
+        {
+            printf("SQL error: %s\n", errmsg);
+            sqlite3_free(errmsg);
+            return -1;
+        }
+        if (nRow != 1)
+        {
+            // 登录失败
+            printf("登录失败\n");
+            sqlite3_free_table(pazResult);
+            sqlite3_close(db);
+            return 2;
+        }
+        // 判断设备信息是否存在
+        sprintf(sql, "select * from devices where device_name = '%s'", data->devname);
+        if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg))
+        {
+            printf("SQL error: %s\n", errmsg);
+            sqlite3_free(errmsg);
+            return -1;
+        }
+        if (nRow == 1)
+        {
+            // 存在就更新数据
+            sprintf(sql, "update devices set active = 1, thread_id = %lu, accept_fd = %d where device_name = '%s'", pthread_self(), data->accept_fd, data->devname);
+            if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
+            {
+                printf("SQL error: %s\n", errmsg);
+                sqlite3_free(errmsg);
+                return -1;
+            }
+            
+        } else {
+            // 查询无结果就插入数据库
+            sprintf(sql, "insert into devices (device_name, active, thread_id, accept_fd, user_id) values ('%s', 1, %lu, %d, (select id from users where name = '%s'))", data->devname, pthread_self(), data->accept_fd, data->username);
+            if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
+            {
+                printf("SQL error: %s\n", errmsg);
+                sqlite3_free(errmsg);
+                return -1;
+            }
+        }
+
         break;
     case 3:
         /* code */
