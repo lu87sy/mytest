@@ -11,8 +11,9 @@ char* errmsg = NULL;
 
 // 函数声明
 int InitDB(void);
-int actionDB();
+int actionDB(int cases, char *username, char *passwd, char *devname);
 void *thread_func(void *arg);
+int callback(void *data, int argc, char **argv, char **azColName);
 
 
 int main(int argc, char const *argv[])
@@ -110,21 +111,31 @@ int InitDB(void)
     }
     printf("sqlite3_open success\n");
 
-    // 创建Users表
-    char sql[256] = "create table if not exists users (id integer primary key autoincrement, name char[30], passwd text)";
-    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg))
+    // 启用外键支持
+    char sql[256] = "PRAGMA foreign_keys = ON";
+    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
     {
         fprintf(stderr, "SQL error: %s\n", errmsg);
+        sqlite3_free(errmsg);
+        return -1;
+    }
+    
+
+    // 创建Users表
+    sprintf(sql, "create table if not exists users (id integer primary key autoincrement, name char[30], passwd text)");
+    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg))
+    {
+        printf("SQL error: %s\n", errmsg);
         sqlite3_free(errmsg);
         return -1;
     }
     printf("create table success\n");
 
     // 创建Devices表
-    sprintf(sql,"create table if not exists devices (id integer primary key autoincrement, device_name char[30], active integer, foreign key(id) references users(id))");
+    sprintf(sql,"create table if not exists devices (id integer primary key autoincrement, device_name char[30], active integer, user_id integer, foreign key(user_id) references users(id))");
     if (sqlite3_exec(db, sql, NULL, NULL, &errmsg))
     {
-        fprintf(stderr, "SQL error: %s\n", errmsg);
+        printf("SQL error: %s\n", errmsg);
         sqlite3_free(errmsg);
         return -1;
     }
@@ -144,6 +155,7 @@ void *thread_func(void *arg)
     ssize_t res = 0;
     char * tmp, *saveptr;
     char value[20];
+    char username[20], passwd[20], devname[20];
 
     while (1)
     {
@@ -177,11 +189,59 @@ void *thread_func(void *arg)
                 if (!strcmp(value, "reg"))
                 {
                     printf("这是注册数据\n");
-                    /* code */
+                    printf("当前会话的accept_fd:%d\n", accept_fd);
+                    // 注册流程
+                    sscanf(buf, "%*[^u]usrname=%19[^,]", username);
+                    sscanf(buf, "%*[^p]passwd=%19[^;]", passwd);
+                    if (strcmp(username, "") == 0 || strcmp(passwd, "") == 0)
+                    {
+                        if (-1 == send(accept_fd, "toCli:reg failed,username and password cannot be empty;" , strlen("toCli:reg failed,username and password cannot be empty;"), 0))
+                        {
+                            perror("send error");
+                            break;
+                        }
+                    } else{
+                        int res = actionDB(1, username, passwd, NULL);
+                        if (res == 1)
+                        {
+                            if (-1 == send(accept_fd, "toCli:reg failed,username already exists;" , strlen("toCli:reg failed,username already exists;"), 0))
+                            {
+                                perror("send error");
+                                break;
+                            }
+                        } else {
+                            if (-1 == send(accept_fd, "toCli:reg success;" , strlen("toCli:reg success;"), 0))
+                            {
+                                perror("send error");
+                                break;
+                            }
+                            printf("注册成功\n");
+                        }
+                    }
+                    
                 } else if (!strcmp(value, "log"))
                 {
                     printf("这是登录数据\n");
-                    /* code */
+                    // 登录流程 toServ:action=log,usrname=xiaowang,passwd=123456,devname=sml001;
+                    sscanf(buf, "%*[^u]usrname=%19[^,]", username);
+                    sscanf(buf, "%*[^p]passwd=%19[^,]", passwd);
+                    sscanf(buf, "%*[^d]devname=%19[^;]", devname);
+                    if (strcmp(username, "") == 0 || strcmp(passwd, "") == 0 || strcmp(devname, "") == 0)
+                    {
+                        if (-1 == send(accept_fd, "toCli:log failed,username,password and devname cannot be empty;" , strlen("toCli:log failed,username,password and devname cannot be empty;"), 0))
+                        {
+                            perror("send error");
+                            break;
+                        }
+                    } else {
+                        int res = actionDB(2, username, passwd, devname);
+                        if (res == 1)
+                        {
+                            /* code */
+                        }
+                        
+                    }
+                    
                 } else if (!strcmp(value, "gettime"))
                 {
                     // 获取当前时间
@@ -205,15 +265,13 @@ void *thread_func(void *arg)
                     }
                 } else {
                     printf("数据格式错误\n");
-                    if (-1 == send(accept_fd, "toCli:cmd invalid,reason invalid parameter for action;", strlen("toCli:cmd invalid,reason invalid parameter for action;"), 0))
+                    if (-1 == send(accept_fd, "toCli:cmd invalid,invalid parameter for action;", strlen("toCli:cmd invalid,invalid parameter for action;"), 0))
                     {
                         perror("send error");
                         break;
                     }
                     
-                }
-                
-                
+                }  
             } 
             // 服务器转发数据
             else if (strcmp(value, "toDev") == 0)
@@ -222,7 +280,7 @@ void *thread_func(void *arg)
             } else {
                 printf("数据格式错误\n");
                 // 发送错误信息
-                if (-1 == send(accept_fd, "toCli:cmd invalid,reason missing colon;", strlen("toCli:cmd invalid,reason missing colon;"), 0))
+                if (-1 == send(accept_fd, "toCli:cmd invalid,missing colon;", strlen("toCli:cmd invalid,missing colon;"), 0))
                 {
                     perror("send error");
                     break;
@@ -231,7 +289,7 @@ void *thread_func(void *arg)
         } else {
             printf("数据格式错误\n");
             // 发送错误信息
-            if (-1 == send(accept_fd, "toCli:cmd invalid,reason missing semicolon;", strlen("toCli:cmd invalid,reason missing semicolon;"), 0))
+            if (-1 == send(accept_fd, "toCli:cmd invalid,missing semicolon;", strlen("toCli:cmd invalid,missing semicolon;"), 0))
             {
                 perror("send error");
                 break;
@@ -256,7 +314,72 @@ void *thread_func(void *arg)
 }
 
 // 数据库操作
-int actionDB()
+int actionDB(int cases, char *username, char *passwd, char *devname)
 {
+    // 打开数据库
+    sqlite3 *db;
+    if (sqlite3_open("./transparent.db", &db) != SQLITE_OK)
+    {
+        printf("sqlite3_open failed: %d:%s\n", sqlite3_errcode(db), sqlite3_errmsg(db));
+        return -1;
+    }
+
+    // 启用外键支持
+    char sql[256] = "PRAGMA foreign_keys = ON";
+    if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
+    {
+        fprintf(stderr, "SQL error: %s\n", errmsg);
+        sqlite3_free(errmsg);
+        return -1;
+    }
+
+    // 判断数据库操作类型
+    char **pazResult = NULL;
+    int nRow = 0, nColumn = 0;  // 定义行、列
+    switch (cases)
+    {
+    // case 1为注册，2为登录，3为查询
+    case 1:
+        // 先判断用户名是否存在
+        printf("已进入注册流程 %s, %s\n", username, passwd);
+        sprintf(sql, "select * from users where name = '%s'", username);
+        if (sqlite3_get_table(db, sql, &pazResult, &nRow, &nColumn, &errmsg) != SQLITE_OK)
+        {
+            printf("SQL error: %s\n", errmsg);
+            sqlite3_free(errmsg);
+            return -1;
+        }
+        if (nRow == 1)
+        {
+            // 通过flag判断是否有返回结果为1则存在
+            printf("用户名已存在\n");
+            // 释放结果集
+            sqlite3_free_table(pazResult);
+            // 关闭数据库
+            sqlite3_close(db);
+            // 用户存在返回1
+            return 1;
+        }
+        // 用户名不存在就注册
+        sprintf(sql, "insert into users (name, passwd) values ('%s', '%s')", username, passwd);
+        if (sqlite3_exec(db, sql, NULL, NULL, &errmsg) != SQLITE_OK)
+        {
+            printf("SQL error: %s\n", errmsg);
+            sqlite3_free(errmsg);
+            return -1;
+        }
+        break;
+    case 2:
+        /* code */
+        break;
+    case 3:
+        /* code */
+        break;
+    default:
+        break;
+    }
+    // 关闭数据库
+    sqlite3_close(db);
     return 0;
 }
+

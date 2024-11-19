@@ -10,15 +10,16 @@ int main() {
     char *saveptr;
 
 
-    char input[] = "toServ:action=log,usrname=xiaowang,passwd=123456,devname=sml02;";
+    char input[] = "toServ:actioan=log,usrname=xiaowang,passwd=123456,devname=sml02;";
     // char input[] = "devname=sml001,led=on,beep=on,action=hello world,alarm=yes;";
     char action[50];
 
     // 使用 sscanf 提取字符串中的各个部分
     // sscanf(input, "%[^:]:action=%[^,],usrname=%[^,],passwd=%[^,],devname=%[^;];",
         //    toServ, action, usrname, passwd, devname);"%*[^p]passwd=%19[^,]"
-    // sscanf(input, "%*[^l]led=%49[^,]", action);
-    sscanf(input, "%[^:]", action);
+    sscanf(input, "%*[^a]action=%49[^,]", action);
+    if (strcmp(action, "") == 0) printf("无值\n");
+    // sscanf(input, "%[^:]", action);
 
 
     // 打印提取的字符串
